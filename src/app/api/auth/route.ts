@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { google } from "googleapis";
 
 const oauth2Client = new google.auth.OAuth2(
@@ -7,7 +7,7 @@ const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_REDIRECT_URI
 );
 
-export async function GET(request: NextRequest) {
+export async function GET() {
   const scopes = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.labels",
@@ -22,7 +22,7 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({ authUrl });
 }
 
-export async function POST(request: NextRequest) {
+export async function POST() {
   // Clear the authentication cookies
   const response = NextResponse.json({ success: true, message: "Logged out" });
   response.cookies.set("access_token", "", { maxAge: 0 });

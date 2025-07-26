@@ -46,7 +46,7 @@ export default function Home() {
       if (data.authUrl) {
         window.location.href = data.authUrl;
       }
-    } catch (error) {
+    } catch {
       setError("Failed to start authentication");
     }
   };
@@ -100,7 +100,7 @@ export default function Home() {
       } else {
         setError(data.error || "Failed to process emails");
       }
-    } catch (error) {
+    } catch {
       setError("Network error occurred");
     } finally {
       setIsProcessing(false);
@@ -120,7 +120,7 @@ export default function Home() {
       } else {
         setError(data.message || "Failed to log out");
       }
-    } catch (error) {
+    } catch {
       setError("Network error occurred during logout");
     }
   };

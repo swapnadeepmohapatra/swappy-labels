@@ -3,7 +3,6 @@ import { NextRequest, NextResponse } from "next/server";
 export async function GET(request: NextRequest) {
   try {
     const accessToken = request.cookies.get("access_token")?.value;
-    const refreshToken = request.cookies.get("refresh_token")?.value;
 
     if (!accessToken) {
       return NextResponse.json({ authenticated: false });
