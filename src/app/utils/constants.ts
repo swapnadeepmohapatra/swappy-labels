@@ -1,0 +1,18 @@
+export const validCategories = [
+  "Work",
+  "Personal",
+  "Finance",
+  "Promotions",
+  "Travel",
+  "Sales",
+  "Newsletter",
+  "Social",
+  "Shopping",
+  "Entertainment",
+  "Health",
+  "Education",
+  "Automated",
+  "Spam",
+  "Important",
+  "Urgent",
+];
