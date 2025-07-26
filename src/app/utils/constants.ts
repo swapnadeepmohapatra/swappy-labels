@@ -1,4 +1,4 @@
-export const MAX_EMAILS = 10;
+export const MAX_EMAILS = 5;
 
 export const validCategories = [
   "Work",
@@ -17,4 +17,5 @@ export const validCategories = [
   "Spam",
   "Important",
   "Urgent",
+  "Other",
 ];

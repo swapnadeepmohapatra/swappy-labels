@@ -9,6 +9,7 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.57.0",
     "@google/genai": "^1.11.0",
     "googleapis": "^154.0.0",
     "html-to-text": "^9.0.5",

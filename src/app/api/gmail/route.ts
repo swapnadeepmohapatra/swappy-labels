@@ -1,18 +1,31 @@
 import { NextRequest, NextResponse } from "next/server";
 import { google } from "googleapis";
 import { GoogleGenAI } from "@google/genai";
+import { Anthropic } from "@anthropic-ai/sdk";
 import { MAX_EMAILS, validCategories } from "@/app/utils/constants";
 import { htmlToText } from "html-to-text";
 
 // Initialize Gemini AI
 const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY! });
+// Initialize Anthropic (Claude)
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
 
 interface EmailData {
   id: string;
   subject: string;
   category: string;
   labeled: boolean;
+  model?: string;
+  tokens?: number;
+  cost?: number;
   error?: string;
+}
+
+interface ClassificationResult {
+  category: string;
+  model: string;
+  tokens: number;
+  cost: number;
 }
 
 interface GmailPayload {
@@ -25,7 +38,7 @@ interface GmailPayload {
 
 export async function POST(request: NextRequest) {
   try {
-    const { accessToken } = await request.json();
+    const { accessToken, emailId } = await request.json();
 
     if (!accessToken) {
       return NextResponse.json(
@@ -38,6 +51,15 @@ export async function POST(request: NextRequest) {
     const oauth2Client = new google.auth.OAuth2();
     oauth2Client.setCredentials({ access_token: accessToken });
     const gmail = google.gmail({ version: "v1", auth: oauth2Client });
+
+    // Fetch the user's email address
+    let userEmail = "";
+    try {
+      const profile = await gmail.users.getProfile({ userId: "me" });
+      userEmail = profile.data.emailAddress || "";
+    } catch (e) {
+      console.error("Failed to fetch user email address", e);
+    }
 
     const customLabelNames = await getCustomLabelNames(gmail);
 
@@ -56,50 +78,28 @@ export async function POST(request: NextRequest) {
     });
 
     const emails = emailsResponse.data.messages || [];
+
+    // If emailId is provided, process only that specific email
+    if (emailId) {
+      const targetEmail = emails.find((email) => email.id === emailId);
+      if (!targetEmail) {
+        return NextResponse.json(
+          { error: "Email not found or already processed" },
+          { status: 404 }
+        );
+      }
+
+      const result = await processSingleEmail(gmail, targetEmail);
+      return NextResponse.json({ results: [result], userEmail });
+    }
+
+    // If no emailId provided, process all available emails
     const results: EmailData[] = [];
 
-    // Process each email
     for (const email of emails) {
       try {
-        // Get email details
-        const emailDetails = await gmail.users.messages.get({
-          userId: "me",
-          id: email.id!,
-        });
-
-        const headers = emailDetails.data.payload?.headers;
-        const subject =
-          headers?.find((h) => h.name === "Subject")?.value || "No Subject";
-        const from =
-          headers?.find((h) => h.name === "From")?.value || "Unknown Sender";
-
-        // Extract email body
-        const body = extractEmailBody(
-          emailDetails.data.payload as GmailPayload
-        );
-
-        // Classify email using Gemini with comprehensive data
-        const category = await classifyEmail(subject, from, body);
-
-        // Check if label exists, create if not
-        const labelId = await ensureLabelExists(gmail, category);
-
-        // Apply label to email
-        await gmail.users.messages.modify({
-          userId: "me",
-          id: email.id!,
-          requestBody: {
-            addLabelIds: [labelId],
-            removeLabelIds: ["UNREAD"],
-          },
-        });
-
-        results.push({
-          id: email.id!,
-          subject,
-          category,
-          labeled: true,
-        });
+        const result = await processSingleEmail(gmail, email);
+        results.push(result);
       } catch (error) {
         console.error(`Error processing email ${email.id}:`, error);
         results.push({
@@ -112,13 +112,73 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    return NextResponse.json({ results });
+    return NextResponse.json({ results, userEmail });
   } catch (error) {
     console.error("Error in Gmail processing:", error);
     return NextResponse.json(
       { error: "Failed to process emails" },
       { status: 500 }
     );
+  }
+}
+
+async function processSingleEmail(
+  gmail: ReturnType<typeof google.gmail>,
+  email: { id?: string | null }
+): Promise<EmailData> {
+  try {
+    // Get email details
+    const emailDetails = await gmail.users.messages.get({
+      userId: "me",
+      id: email.id!,
+    });
+
+    const headers = emailDetails.data.payload?.headers;
+    const subject =
+      headers?.find((h) => h.name === "Subject")?.value || "No Subject";
+    const from =
+      headers?.find((h) => h.name === "From")?.value || "Unknown Sender";
+
+    // Extract email body
+    const body = extractEmailBody(emailDetails.data.payload as GmailPayload);
+
+    // Classify email using AI
+    const classificationResult = await classifyEmail(subject, from, body);
+
+    // Check if label exists, create if not
+    const labelId = await ensureLabelExists(
+      gmail,
+      classificationResult.category
+    );
+
+    // Apply label to email
+    await gmail.users.messages.modify({
+      userId: "me",
+      id: email.id!,
+      requestBody: {
+        addLabelIds: [labelId],
+        removeLabelIds: ["UNREAD"],
+      },
+    });
+
+    return {
+      id: email.id!,
+      subject,
+      category: classificationResult.category,
+      labeled: true,
+      model: classificationResult.model,
+      tokens: classificationResult.tokens,
+      cost: classificationResult.cost,
+    };
+  } catch (error) {
+    console.error(`Error processing email ${email.id}:`, error);
+    return {
+      id: email.id!,
+      subject: "Error processing email",
+      category: "Error",
+      labeled: false,
+      error: error instanceof Error ? error.message : "Unknown error",
+    };
   }
 }
 
@@ -189,78 +249,73 @@ async function classifyEmail(
   subject: string,
   from: string,
   body: string
-): Promise<string> {
+): Promise<ClassificationResult> {
   const prompt = `Analyze this email and classify it into one of the following categories: [${validCategories.join(
     ", "
-  )}]. 
+  )}]. \n\nConsider these factors to determine if it's an important email vs automated/sales:\n1. Sender email domain (personal domains vs corporate vs marketing platforms)\n2. Subject line patterns (urgency indicators, personal names, vs generic marketing)\n3. Email body content (personalized vs generic, action required vs informational)\n4. Language patterns (formal vs casual, specific vs generic)\n\nCategories explanation:\n- "Important": Critical emails requiring immediate attention (work deadlines, personal emergencies)\n- "Urgent": Time-sensitive matters that need quick response\n- "Work": Professional communications from colleagues, clients, or work-related services\n- "Personal": Messages from friends, family, or personal contacts\n- "Finance": Banking, bills, financial statements, investment updates\n- "Sales": Marketing emails trying to sell products/services\n- "Promotions": Discounts, deals, promotional offers\n- "Newsletter": Regular updates from subscribed services\n- "Social": Social media notifications, event invitations\n- "Shopping": Order confirmations, shipping updates, e-commerce\n- "Entertainment": Movies, games, streaming services\n- "Health": Medical appointments, health insurance, fitness\n- "Education": Course updates, academic communications\n- "Automated": System notifications, confirmations, receipts\n- "Spamming": Unwanted, suspicious, or irrelevant emails\n- "Other": Other categories not listed above\n\nEmail Details:\nFrom: ${from}\nSubject: ${subject}\nBody Preview: ${body.substring(
+    0,
+    500
+  )}${
+    body.length > 500 ? "..." : ""
+  }\n\nReturn only following json format. Don't return anything else, strictly return this json: {"category": "category name"}`;
 
-Consider these factors to determine if it's an important email vs automated/sales:
-1. Sender email domain (personal domains vs corporate vs marketing platforms)
-2. Subject line patterns (urgency indicators, personal names, vs generic marketing)
-3. Email body content (personalized vs generic, action required vs informational)
-4. Language patterns (formal vs casual, specific vs generic)
+  // Try Claude (Anthropic)
+  try {
+    const claudePrompt = prompt + "\nReturn only the category name:";
+    const completion = await anthropic.messages.create({
+      model: "claude-3-haiku-20240307", // Use Haiku for speed/cost, or Opus/Sonnet if desired
+      max_tokens: 20,
+      messages: [{ role: "user", content: claudePrompt }],
+    });
 
-Categories explanation:
-- "Important": Critical emails requiring immediate attention (work deadlines, personal emergencies)
-- "Urgent": Time-sensitive matters that need quick response
-- "Work": Professional communications from colleagues, clients, or work-related services
-- "Personal": Messages from friends, family, or personal contacts
-- "Finance": Banking, bills, financial statements, investment updates
-- "Sales": Marketing emails trying to sell products/services
-- "Promotions": Discounts, deals, promotional offers
-- "Newsletter": Regular updates from subscribed services
-- "Social": Social media notifications, event invitations
-- "Shopping": Order confirmations, shipping updates, e-commerce
-- "Entertainment": Movies, games, streaming services
-- "Health": Medical appointments, health insurance, fitness
-- "Education": Course updates, academic communications
-- "Automated": System notifications, confirmations, receipts
-- "Spamming": Unwanted, suspicious, or irrelevant emails
-- "Other": Other categories not listed above
+    const claudeCategory = JSON.parse(
+      completion.content[0].type === "text" ? completion.content[0].text : ""
+    ).category;
 
-Email Details:
-From: ${from}
-Subject: ${subject}
-Body Preview: ${body.substring(0, 500)}${body.length > 500 ? "..." : ""}
-
-Return only the category name:`;
-
-  let retries = 0;
-  const maxRetries = 2;
-
-  while (retries <= maxRetries) {
-    try {
-      const result = await genAI.models.generateContent({
-        model: "gemini-1.5-flash",
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        config: {
-          temperature: 0.3, // Lower temperature for more consistent classification
-        },
-      });
-      const category = result.text?.trim() || "";
-
-      // Validate the response is one of our expected categories
-      if (category && validCategories.includes(category)) {
-        return category;
-      } else {
-        // If response is not valid, retry
-        retries++;
-        if (retries > maxRetries) {
-          return "Personal"; // Default fallback
-        }
-      }
-    } catch (error) {
-      retries++;
-      if (retries > maxRetries) {
-        console.error("Gemini API error after retries:", error);
-        return "Personal"; // Default fallback
-      }
-      // Wait before retrying
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+    if (claudeCategory && validCategories.includes(claudeCategory)) {
+      const estimatedTokens =
+        completion.usage.input_tokens + completion.usage.output_tokens;
+      const cost =
+        (completion.usage.input_tokens * 0.8) / 1000000 +
+        (completion.usage.output_tokens * 4) / 1000000;
+      return {
+        category: claudeCategory,
+        model: "anthropic",
+        tokens: estimatedTokens,
+        cost,
+      };
     }
+  } catch (error) {
+    console.error("Claude API error:", error);
   }
 
-  return "Personal"; // Final fallback
+  // Then try Gemini
+  try {
+    const result = await genAI.models.generateContent({
+      model: "gemini-1.5-flash",
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+      config: {
+        temperature: 0.3,
+      },
+    });
+    const category = result.text?.trim() || "";
+    if (category && validCategories.includes(category)) {
+      // Estimate tokens for Gemini (rough approximation: 1 token ≈ 4 characters)
+      const estimatedTokens = result.usageMetadata?.totalTokenCount || 0;
+      const cost = estimatedTokens * 1.25;
+
+      return {
+        category,
+        model: "gemini",
+        tokens: estimatedTokens,
+        cost,
+      };
+    }
+  } catch (error) {
+    console.error("Gemini API error:", error);
+  }
+
+  return { category: "Other", model: "fallback", tokens: 0, cost: 0 }; // Final fallback
 }
 async function getCustomLabelNames(
   gmail: ReturnType<typeof google.gmail>
