@@ -1,3 +1,5 @@
+export const MAX_EMAILS = 10;
+
 export const validCategories = [
   "Work",
   "Personal",

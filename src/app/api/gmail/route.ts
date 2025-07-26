@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { google } from "googleapis";
 import { GoogleGenAI } from "@google/genai";
-import { validCategories } from "@/app/utils/constants";
+import { MAX_EMAILS, validCategories } from "@/app/utils/constants";
 import { htmlToText } from "html-to-text";
 
 // Initialize Gemini AI
@@ -39,11 +39,20 @@ export async function POST(request: NextRequest) {
     oauth2Client.setCredentials({ access_token: accessToken });
     const gmail = google.gmail({ version: "v1", auth: oauth2Client });
 
-    // Fetch unread emails
+    const customLabelNames = await getCustomLabelNames(gmail);
+
+    let query = "is:unread";
+    if (customLabelNames.length > 0) {
+      const excludeLabels = customLabelNames
+        .map((name: string) => `-label:"${name}"`) // label:<name>, quoted for spaces
+        .join(" ");
+      query += ` ${excludeLabels}`;
+    }
+
     const emailsResponse = await gmail.users.messages.list({
       userId: "me",
-      q: "is:unread",
-      maxResults: 2,
+      q: query,
+      maxResults: MAX_EMAILS,
     });
 
     const emails = emailsResponse.data.messages || [];
@@ -63,21 +72,11 @@ export async function POST(request: NextRequest) {
           headers?.find((h) => h.name === "Subject")?.value || "No Subject";
         const from =
           headers?.find((h) => h.name === "From")?.value || "Unknown Sender";
-        const to = headers?.find((h) => h.name === "To")?.value || "";
-        const date = headers?.find((h) => h.name === "Date")?.value || "";
 
         // Extract email body
         const body = extractEmailBody(
           emailDetails.data.payload as GmailPayload
         );
-
-        console.log({
-          subject,
-          from,
-          to,
-          date,
-          body,
-        });
 
         // Classify email using Gemini with comprehensive data
         const category = await classifyEmail(subject, from, body);
@@ -262,6 +261,28 @@ Return only the category name:`;
   }
 
   return "Personal"; // Final fallback
+}
+async function getCustomLabelNames(
+  gmail: ReturnType<typeof google.gmail>
+): Promise<string[]> {
+  try {
+    const labelsResponse = await gmail.users.labels.list({ userId: "me" });
+    const allLabels = labelsResponse.data.labels || [];
+
+    const customLabelNames = validCategories;
+
+    const matchingLabelNames: string[] = [];
+    for (const label of allLabels) {
+      if (label.name && customLabelNames.includes(label.name)) {
+        matchingLabelNames.push(label.name); // Use name, not ID
+      }
+    }
+
+    return matchingLabelNames;
+  } catch (error) {
+    console.error("Error getting custom label names:", error);
+    return [];
+  }
 }
 
 async function ensureLabelExists(
